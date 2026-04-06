@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IoT Monitor Pro - Rama Naufal</title>
+    
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body { background-color: #f4f7f6; font-family: 'Segoe UI', sans-serif; }
+        .card { border: none; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); transition: 0.3s; }
+        .table-wrapper { max-height: 400px; overflow-y: auto; }
+        .danger-row { background-color: #ffe5e5 !important; color: #d9534f; font-weight: bold; }
+        .danger-alert { animation: blinker 1s linear infinite; color: #dc3545; font-weight: bold; }
+        @keyframes blinker { 50% { opacity: 0; } }
+        .card-warning-active { border: 2px solid #dc3545 !important; background-color: #fff5f5; animation: pulse-red 2s infinite; }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(220, 53, 69, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0); }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container py-5">
+    <div class="row mb-4 align-items-center">
+        <div class="col-lg-6">
+            <h2 class="fw-bold text-dark"><i class="fas fa-microchip text-primary me-2"></i>IoT System Monitor</h2>
+            <div id="status-display" class="mt-2">
+                <span class="badge bg-secondary p-2" id="log-indicator">SISTEM SIAGA</span>
+                <span class="ms-2 text-muted small">Update: <span id="last-update">--:--:--</span></span>
+            </div>
+        </div>
+        <div class="col-lg-6 text-lg-end mt-3">
+            <div id="system-msg" class="danger-alert d-inline-block me-3" style="display:none !important;">
+                <i class="fas fa-exclamation-triangle"></i> TERDETEKSI BAHAYA!
+            </div>
+            <div class="d-inline-block me-2 text-start">
+                <label class="small fw-bold d-block">Interval (s):</label>
+                <input type="number" id="interval-val" class="form-control form-control-sm" style="width: 70px;" value="3" min="1">
+            </div>
+            <button id="toggle-btn" class="btn btn-success fw-bold px-4 shadow-sm" onclick="toggleLogging()">MULAI MONITORING</button>
+        </div>
+    </div>
+
+    <div class="row g-3 mb-4 text-center">
+        <div class="col-md-3">
+            <div class="card p-3">
+                <small class="text-muted fw-bold">SUHU DHT11</small>
+                <h2 class="text-primary" id="card-temp">--°C</h2>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card p-3">
+                <small class="text-muted fw-bold">KELEMBAPAN</small>
+                <h2 class="text-info" id="card-humi">--%</h2>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card p-3">
+                <small class="text-muted fw-bold">SUHU LM35</small>
+                <h2 class="text-warning" id="card-lm">--°C</h2>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card p-3" id="card-gas-box">
+                <small class="text-muted fw-bold">GAS MQ2</small>
+                <h2 class="text-danger" id="card-gas">--</h2>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xl-8">
+            <div class="card p-4 h-100">
+                <h6 class="fw-bold mb-4">Grafik Real-time</h6>
+                <canvas id="iotChart"></canvas>
+            </div>
+        </div>
+        <div class="col-xl-4">
+            <div class="card p-4 h-100">
+                <h6 class="fw-bold mb-3">Log Riwayat</h6>
+                <div class="table-wrapper">
+                    <table class="table table-sm table-hover" id="dataTable">
+                        <thead>
+                            <tr><th>Waktu</th><th>Suhu</th><th>Gas</th><th>Status</th></tr>
+                        </thead>
+                        <tbody id="table-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const firebaseConfig = {
+        apiKey: "AIzaSyCsqfNmZicnuTbP7_IWE2x2cm__XfgJPy8",
+        databaseURL: "https://monitor-bf5a5-default-rtdb.asia-southeast1.firebasedatabase.app"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const database = firebase.database();
+
+    let isLogging = false;
+    let logTimer;
+    let alarmInterval; 
+    const ctx = document.getElementById('iotChart').getContext('2d');
+
+    function playAlertVoice(message) {
+        if ('speechSynthesis' in window) {
+            const msg = new SpeechSynthesisUtterance(message);
+            msg.lang = 'id-ID';
+            window.speechSynthesis.speak(msg);
+        }
+    }
+
+    function stopAlarm() {
+        if (alarmInterval) { clearInterval(alarmInterval); alarmInterval = null; }
+        window.speechSynthesis.cancel();
+    }
+
+    const iotChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                { label: 'DHT11 (°C)', data: [], borderColor: '#0d6efd', tension: 0.3 },
+                { label: 'LM35 (°C)', data: [], borderColor: '#ffc107', tension: 0.3 },
+                { label: 'Gas (MQ2)', data: [], borderColor: '#dc3545', yAxisID: 'y1', fill: true }
+            ]
+        }
+    });
+
+    function toggleLogging() {
+        isLogging = !isLogging;
+        const btn = document.getElementById('toggle-btn');
+        const indicator = document.getElementById('log-indicator');
+        const userInterval = document.getElementById('interval-val').value * 1000;
+
+        if (isLogging) {
+            btn.innerText = "HENTIKAN MONITOR";
+            btn.className = "btn btn-danger fw-bold px-4 shadow-sm";
+            indicator.innerText = "MONITORING AKTIF";
+            indicator.className = "badge bg-success p-2";
+            playAlertVoice("Sistem monitoring aktif.");
+
+            logTimer = setInterval(() => {
+                // DISESUAIKAN: Membaca path "Data_Sensor/Monitoring" sesuai ESP32 kamu
+                database.ref('Data_Sensor/Monitoring').once('value', (snap) => {
+                    const data = snap.val();
+                    if(data) updateDashboard(data);
+                });
+            }, userInterval);
+        } else {
+            btn.innerText = "MULAI MONITORING";
+            btn.className = "btn btn-success fw-bold px-4 shadow-sm";
+            indicator.innerText = "SISTEM SIAGA";
+            indicator.className = "badge bg-secondary p-2";
+            clearInterval(logTimer);
+            stopAlarm();
+        }
+    }
+
+    function updateDashboard(data) {
+        const time = new Date().toLocaleTimeString();
+        
+        // DISESUAIKAN: Nama variabel sesuai dengan json.set di ESP32 kamu
+        const tempDHT = data.Suhu_DHT || 0;
+        const humiDHT = data.Humi_DHT || 0;
+        const tempLM35 = data.Suhu_LM35 || 0;
+        const gasValue = data.Gas_MQ2 || 0;
+        const statusGlobal = data.Status_Global ? data.Status_Global.trim() : "AMAN";
+        
+        const isCritical = (statusGlobal === "BAHAYA");
+
+        if (isCritical) {
+            document.getElementById('card-gas-box').classList.add('card-warning-active');
+            document.getElementById('system-msg').style.setProperty('display', 'inline-block', 'important');
+            if (!alarmInterval) {
+                playAlertVoice("Peringatan bahaya terdeteksi!");
+                alarmInterval = setInterval(() => {
+                    if (!window.speechSynthesis.speaking) playAlertVoice("Bahaya! Cek lokasi!");
+                }, 7000);
+            }
+        } else {
+            document.getElementById('card-gas-box').classList.remove('card-warning-active');
+            document.getElementById('system-msg').style.setProperty('display', 'none', 'important');
+            if (alarmInterval) { stopAlarm(); playAlertVoice("Kondisi aman."); }
+        }
+
+        // Tampilkan ke UI
+        document.getElementById('card-temp').innerText = tempDHT.toFixed(1) + "°C";
+        document.getElementById('card-humi').innerText = Math.round(humiDHT) + "%";
+        document.getElementById('card-lm').innerText = tempLM35.toFixed(1) + "°C";
+        document.getElementById('card-gas').innerText = gasValue;
+        document.getElementById('last-update').innerText = time;
+
+        // Update Chart
+        if(iotChart.data.labels.length > 15) {
+            iotChart.data.labels.shift();
+            iotChart.data.datasets.forEach(d => d.data.shift());
+        }
+        iotChart.data.labels.push(time);
+        iotChart.data.datasets[0].data.push(tempDHT);
+        iotChart.data.datasets[1].data.push(tempLM35);
+        iotChart.data.datasets[2].data.push(gasValue);
+        iotChart.update('none');
+
+        // Update Tabel
+        const tbody = document.getElementById('table-body');
+        const row = `<tr class="${isCritical ? 'danger-row' : ''}">
+            <td>${time}</td><td>${tempDHT.toFixed(1)}°C</td><td>${gasValue}</td>
+            <td><span class="badge bg-${isCritical ? 'danger' : 'success'}">${statusGlobal}</span></td>
+        </tr>`;
+        tbody.insertAdjacentHTML('afterbegin', row);
+        if(tbody.children.length > 15) tbody.lastElementChild.remove();
+    }
+</script>
+</body>
+</html>
